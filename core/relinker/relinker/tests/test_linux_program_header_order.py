@@ -1,4 +1,4 @@
-"""Check that a Linux relink orders PT_PHDR and PT_INTERP before the PT_LOAD entries and sorts the PT_LOAD entries by address."""
+"""Check that a Linux relink orders PT_PHDR and PT_INTERP before the PT_LOAD entries, sorts the PT_LOAD entries by address and keeps one PT_PHDR and one PT_INTERP when the input carries its own."""
 
 from pathlib import Path
 import platform
@@ -22,15 +22,22 @@ TEXT = (PT_LOAD, 5, 0x4000, 0x0000, 0x1000, 0x1000, 0x1000)
 RODATA = (PT_LOAD, 4, 0x5000, 0x1000, 0x0800, 0x0800, 0x1000)
 DATA = (PT_LOAD, 6, 0x6000, 0x2000, 0x1000, 0x1800, 0x1000)
 PROCPARAM = (PT_OS_PROCPARAM, 4, 0x5400, 0x1400, 0x0040, 0x0040, 0x10)
+INPUT_PHDR = (PT_PHDR, 4, 0x0040, 0x0040, 0x0000, 0x0000, 0x8)
+INPUT_INTERP = (PT_INTERP, 4, 0x7F00, 0x7F00, 0x001C, 0x001C, 0x1)
+INPUT_INTERP_PATH = b"/lib64/ld-linux-x86-64.so.2\0"
 DYNAMIC_OFFSET = 0x6400
 TAGS = [(5, 0x2600), (10, 1), (6, 0x2620), (11, 24), (7, 0x2700), (8, 0), (9, 24), (0, 0)]
 
 
-def multi_load_fixture(segments):
+def multi_load_fixture(segments, carried=()):
     image = bytearray(0x8000)
     image[:16] = b"\x7fELF\x02\x01\x01" + bytes(9)
-    headers = [*segments, (PT_DYNAMIC, 6, DYNAMIC_OFFSET, 0x2400, len(TAGS) * 16, len(TAGS) * 16, 8)]
+    headers = [*carried, *segments, (PT_DYNAMIC, 6, DYNAMIC_OFFSET, 0x2400, len(TAGS) * 16, len(TAGS) * 16, 8)]
     headers += [(PT_SCE_VERSION, 0, 0, 0, 0, 0, 1)] * 4
+    table_size = len(headers) * 56
+    headers = [(kind, flags, offset, vaddr, table_size, table_size, align) if kind == PT_PHDR else (kind, flags, offset, vaddr, filesz, memsz, align)
+               for kind, flags, offset, vaddr, filesz, memsz, align in headers]
+    image[INPUT_INTERP[2]:INPUT_INTERP[2] + len(INPUT_INTERP_PATH)] = INPUT_INTERP_PATH
     struct.pack_into("<HHIQQQIHHHHHH", image, 16,
                      3, 62, 1, TEXT[3], 64, 0, 0, 64, 56, len(headers), 64, 0, 0)
     image[TEXT[2]:TEXT[2] + 1] = b"\xcc"
@@ -106,6 +113,12 @@ def main():
         assert [h[3] for h in headers if h[0] == PT_LOAD][:3] == [TEXT[3], RODATA[3], DATA[3]], headers
         assert kinds_between_loads(headers) == [PT_OS_PROCPARAM], headers
         run_expecting_trap("unordered-loads", unordered)
+
+        carried = convert("carried-headers", multi_load_fixture([TEXT, RODATA, PROCPARAM, DATA], carried=[INPUT_PHDR, INPUT_INTERP]))
+        headers = check_order("carried-headers", carried.read_bytes())
+        assert [h[3] for h in headers if h[0] == PT_LOAD][:3] == [TEXT[3], RODATA[3], DATA[3]], headers
+        assert [h[2] for h in headers if h[0] == PT_INTERP] != [INPUT_INTERP[2]], headers
+        run_expecting_trap("carried-headers", carried)
     print("Linux program header order test passed")
 
 
